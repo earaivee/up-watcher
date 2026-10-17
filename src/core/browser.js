@@ -32,6 +32,29 @@ class BrowserSession {
   }
 
   /**
+   * 落盘的 Cookie 回灌进分区（登录态的另一半：只落盘不回灌等于白存）。
+   * 打包后 userData 目录变了，分区是全新的空壳——不回灌就永远是未登录，
+   * 表现为「资料接口有数据、作品列表一条都截不到」。
+   */
+  static async restoreCookies(url, jar) {
+    if (!jar || !Object.keys(jar).length) return 0;
+    let n = 0;
+    for (const [name, value] of Object.entries(jar)) {
+      if (!value) continue;
+      try {
+        // 不传 expirationDate 会被设成会话 cookie，程序一退就没了；
+        // 落盘时丢了原始过期时间，这里给半年有效期，让登录态能跨重启保留。
+        await BrowserSession.partitionSession().cookies.set({
+          url, name, value: String(value),
+          expirationDate: Math.floor(Date.now() / 1000) + 180 * 24 * 3600,
+        });
+        n++;
+      } catch { /* 单个 cookie 写不进不影响其余 */ }
+    }
+    return n;
+  }
+
+  /**
    * 打开（或复用）隐藏窗口。
    * 注意：这里不做「已在该地址就跳过导航」的优化 —— 截包靠的是响应事件，
    * 不重新导航就拿不到任何响应，第二轮回溯会静默抓到 0 条。

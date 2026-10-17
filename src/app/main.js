@@ -4,8 +4,9 @@
  */
 
 const path = require('path');
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, Tray, Menu, nativeImage } = require('electron');
 const { Store, DATA_DIR_NAME, LEGACY_DATA_DIR_NAME } = require('../core/store');
+const { Logger } = require('../core/log');
 const { BrowserSession } = require('../core/browser');
 const { Registry } = require('../platforms/registry');
 const { Notifier, LoginService, Scheduler, WebViewer } = require('./services');
@@ -13,6 +14,7 @@ const { Api } = require('./api');
 const autostart = require('./autostart');
 
 const windows = new Set();
+let tray = null;
 let store;
 let registry;
 let scheduler;
@@ -20,6 +22,7 @@ let notifier;
 let login;
 let browser;
 let viewer;
+let logger;
 let quitting = false;
 
 /**
@@ -101,6 +104,7 @@ function reportCrash(label, contents, details) {
   try { url = contents.getURL(); } catch { /* 已销毁 */ }
   const reason = `${label}（${details.reason}${details.exitCode !== undefined ? `, code=${details.exitCode}` : ''}）`;
   console.error(`[crash] ${reason} - ${url}`);
+  if (logger) logger.error(`${reason} - ${url}`);
   for (const win of windows) {
     if (!win.isDestroyed()) win.webContents.send('event', { name: 'app:crash', data: { message: reason, url } });
   }
@@ -124,41 +128,160 @@ function createMainWindow() {
   });
   win.loadFile(path.join(__dirname, '..', 'ui', 'index.html'));
   win.once('ready-to-show', () => win.show());
+  win.on('close', (event) => {
+    // 常驻托盘：点关闭只是藏到托盘，调度器继续后台跑；真正退出走托盘「退出」或 before-quit。
+    if (!quitting) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
   win.on('closed', () => windows.delete(win));
   windows.add(win);
   return win;
 }
 
+/** 从托盘恢复主窗口；窗口被销毁了则重建。 */
+function showMainWindow() {
+  const win = [...windows][0];
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  } else {
+    createMainWindow();
+  }
+}
+
+/** 创建系统托盘：左键恢复窗口，右键菜单可退出。 */
+function createTray() {
+  if (tray) return;
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'tray-icon.png'));
+  tray = new Tray(icon);
+  tray.setToolTip('你快更新啊 - 追更提醒');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开主界面', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '退出', click: () => app.quit() },
+  ]));
+  tray.on('click', () => showMainWindow());
+}
+
+/**
+ * 事件的日志摘要：只留排错用得上的几个字段，
+ * 免得 sync:done 里的整包数据把日志撑成几千行。
+ */
+function brief(name, data) {
+  if (!data) return '';
+  const f = {
+    'sync:start': (d) => ` 待刷新 ${d.count ?? d.total ?? ''} 个`,
+    'sync:done': (d) => ` 新增 ${d.added || 0} 条${d.failures?.length ? `，失败 ${d.failures.length} 个` : ''}`,
+    'collect:done': (d) => ` 新增 ${d.added || 0} 条`,
+    'collect:failed': (d) => ` ${d.message || ''}`,
+    'login:changed': (d) => ` ${d.platformId} ok=${d.ok}`,
+    'source:added': (d) => ` ${d.name || d.id}`,
+    'source:removed': (d) => ` ${d.sourceId}`,
+    'source:updated': (d) => ` ${d.sourceId}`,
+    'settings:changed': () => ' 设置已更新',
+  }[name];
+  return f ? f(data) : '';
+}
+
 /** 装配全部依赖。 */
 function bootstrap() {
-  store = new Store(resolveDataRoot());
+  const root = resolveDataRoot();
+  store = new Store(root);
+  // 日志每次启动重写一份，先建好，后面每一步都能往里记
+  logger = new Logger(store.globalDir);
+  logger.verbose = !app.isPackaged; // 开发态顺带打到控制台
+  logger.start([
+    `版本 ${require('../../package.json').version}`,
+    `运行环境 Electron ${process.versions.electron} / Node ${process.versions.node} / Chrome ${process.versions.chrome}`,
+    `系统 ${process.platform} ${process.arch}`,
+    `运行方式 ${app.isPackaged ? '打包版' : '开发模式'}`,
+    `程序 ${process.env.PORTABLE_EXECUTABLE_FILE || process.execPath}`,
+    `数据目录 ${root}`,
+  ]);
+  logger.info('数据目录就绪');
   // 诊断日志属于全局数据，跟着 _global 走
-  viewer = new WebViewer(path.join(store.root, '_global'));
+  viewer = new WebViewer(store.globalDir);
   notifier = new Notifier(store, () => scheduler.settings(), viewer);
   browser = new BrowserSession();
   const emit = (name, data) => {
+    logger.info(`事件 ${name}${brief(name, data)}`);
     for (const win of windows) if (!win.isDestroyed()) win.webContents.send('event', { name, data });
   };
-  registry = new Registry(store, { browser, notify: notifier, emit });
-  scheduler = new Scheduler({ registry, store, notifier, emit });
+  const log = (msg, level) => logger.line((level || 'info').toUpperCase(), msg);
+  registry = new Registry(store, { browser, notify: notifier, emit, log });
+  logger.info(`平台注册表就绪：${registry.list().map((p) => p.id).join(', ')}`);
+  scheduler = new Scheduler({ registry, store, notifier, emit, log });
   // 登录成功或窗口关闭都要通知界面刷新登录状态（否则界面一直显示「未登录」）
   login = new LoginService(registry, (info) => emit('login:changed', info));
   const api = new Api({
-    store, registry, scheduler, notifier, login, browser, viewer, windows: () => windows, emit,
+    store, registry, scheduler, notifier, login, browser, viewer, logger,
+    windows: () => windows, emit,
   });
   api.register();
+  logger.info('装配完成');
 }
 
-app.whenReady().then(() => {
+/**
+ * 登录态回灌：session.json → 浏览器分区。
+ * 打包后 userData 换了目录，persist 分区是空的，落盘的登录态不回灌就全是未登录，
+ * 抖音会静默拿不到作品列表（只给资料）。分区里已经有凭证的就不动它。
+ */
+async function restoreLoginCookies() {
+  for (const def of registry.list()) {
+    const raw = def.login?.cookieUrl || def.login?.entry || def.urls?.list || def.homeUrl || '';
+    let url = '';
+    try { url = new URL(raw).origin; } catch { continue; }
+    const needed = def.login?.cookieNames || []; // 只认「登录后才有的凭证 cookie」，不记值
+    try {
+      const saved = store.readSession(def.id) || {};
+      const jar = saved.cookies || {};
+      const names = Object.keys(jar);
+      const savedCred = needed.filter((n) => jar[n]);
+      const before = await BrowserSession.readCookies(url);
+      const beforeCred = needed.filter((n) => before[n]);
+      logger.info(`${def.name} 登录态存档：${names.length ? `cookie ${names.length} 个，凭证 ${savedCred.length}/${needed.length}${savedCred.length ? `（${savedCred.join('、')}）` : ''}` : '没有存档'}`);
+      logger.info(`${def.name} 浏览器分区：cookie ${Object.keys(before).length} 个，凭证 ${beforeCred.length}/${needed.length}${beforeCred.length ? `（${beforeCred.join('、')}）` : ''}`);
+      if (beforeCred.length) { logger.info(`${def.name} 分区里已有登录凭证，不回灌`); continue; }
+      if (!names.length) {
+        logger.warn(`${def.name} 未登录：存档和分区都没有凭证，请在设置里点「登录」后重启`);
+        continue;
+      }
+      const n = await BrowserSession.restoreCookies(url, jar);
+      const after = await BrowserSession.readCookies(url);
+      const afterCred = needed.filter((x) => after[x]);
+      const msg = `${def.name} 回灌 ${n} 个 cookie → 分区凭证 ${afterCred.length}/${needed.length}`;
+      if (afterCred.length) logger.info(`${msg}（已登录）`);
+      else logger.warn(`${msg}（仍然没有凭证，多半是存档里的登录态已过期，需要重新登录）`);
+    } catch (err) {
+      logger.warn(`${def.name} 登录态回灌失败：${err?.message || err}`);
+    }
+  }
+}
+
+app.whenReady().then(async () => {
   bootstrap();
+  await restoreLoginCookies();
   createMainWindow();
+  createTray();
+  logger.info('主窗口已创建，已常驻系统托盘');
   scheduler.start();
+  logger.info('调度已启动');
   // 便携版整目录搬走后，注册表里的启动项还指向旧 exe，等于自启悄悄失效。
   // 每次启动对一下：设置里记着「开了」，但系统里没有，就按现在的 exe 重新登记。
   try {
     const saved = store.readGlobal('settings.json', {});
-    if (saved.openAtLogin && autostart.supported() && !autostart.get().enabled) autostart.set(true);
-  } catch { /* 被安全软件拦掉就算了，不改用户设置 */ }
+    const state = autostart.supported() ? autostart.get() : { supported: false, enabled: false };
+    logger.info(`开机自启：设置=${!!saved.openAtLogin} 系统=${!!state.enabled}`);
+    if (saved.openAtLogin && state.supported && !state.enabled) {
+      autostart.set(true);
+      logger.info('开机自启已按当前程序路径重新登记');
+    }
+  } catch (err) { /* 被安全软件拦掉就算了，不改用户设置 */
+    logger.warn('开机自启对账失败：' + (err?.message || err));
+  }
   app.on('activate', () => { if (!windows.size) createMainWindow(); });
 });
 
@@ -172,6 +295,7 @@ app.on('before-quit', (event) => {
   quitting = true;
   event.preventDefault();
   try {
+    if (logger) logger.info('准备退出');
     scheduler.stop();
     login.close();
     viewer.close();
@@ -181,4 +305,15 @@ app.on('before-quit', (event) => {
   }
 });
 
-app.on('window-all-closed', () => app.quit());
+// 常驻托盘：窗口被关（实际是 hide）也不退出，真正退出由托盘「退出」触发 before-quit。
+app.on('window-all-closed', () => { /* 不退出 */ });
+
+/** 兜底：没被 catch 的异常以前只在控制台一闪而过，现在必须留在日志里。 */
+process.on('uncaughtException', (err) => {
+  const text = (err && err.stack) || String(err);
+  if (logger) logger.error('未捕获异常：' + text); else console.error(text);
+});
+process.on('unhandledRejection', (reason) => {
+  const text = (reason && reason.stack) || String(reason);
+  if (logger) logger.error('未处理的异步失败：' + text); else console.error(text);
+});

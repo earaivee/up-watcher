@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Button, Form, InputNumber, Modal, Select, Switch } from 'antd';
-import { FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
+import { FileTextOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
 import { api, RANGE_OPTIONS } from '../api.js';
 import { toast } from '../message.js';
 
@@ -9,7 +9,7 @@ import { toast } from '../message.js';
  * 登录状态列表（可实时检查），自定义平台入口，数据目录。
  */
 export default function SettingsModal(props) {
-  const { open, settings, platforms, dataRoot } = props;
+  const { open, settings, platforms, dataRoot, logFile } = props;
   const [form] = Form.useForm();
   const [checking, setChecking] = useState({});
   // 系统里的真实自启状态：用户在系统设置里改过、或 exe 被搬走过，都会跟 settings 不一致
@@ -150,6 +150,17 @@ export default function SettingsModal(props) {
             <Button size="small" icon={<FolderOpenOutlined />}
               onClick={() => api.data.reveal()} title="在资源管理器中打开数据目录">
               打开
+            </Button>
+          </div>
+        </Form.Item>
+
+        <Form.Item label="运行日志" style={{ marginBottom: 0 }}
+          extra="每次启动重新写一份，只记做了什么和出了什么错（不含内容与登录凭证），排错时把这个文件发出来就行">
+          <div className="data-dir-row">
+            <span className="path" title={logFile || ''}>{logFile || 'app.log'}</span>
+            <Button size="small" icon={<FileTextOutlined />}
+              onClick={() => api.log.open()} title="打开本次运行的日志">
+              查看
             </Button>
           </div>
         </Form.Item>

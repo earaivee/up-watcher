@@ -85,9 +85,11 @@ const DOUYIN = {
   login: {
     entry: 'https://www.douyin.com/',
     cookieUrl: 'https://www.douyin.com',
-    // 抖音没有稳定的公开登录态校验接口，靠「登录后才出现的凭证 cookie」判断；
-    // 注意不能把 passport_csrf_token 之类匿名 cookie 算进来，否则会误判成已登录。
-    cookieNames: ['sessionid', 'sessionid_ss', 'sid_tt'],
+    // 抖音没有稳定的公开登录态校验接口，靠「登录后才出现的凭证 cookie」判断。
+    // 注意：sessionid / sessionid_ss / sid_tt 未登录访客也会下发，靠它们判断会
+    // 误报「已登录」——症状就是资料接口能返回、作品列表接口一次都不发。
+    // 真正登录后才有的标志是 sid_guard（登录保护）和 uid_tt / uid_tt_ss（用户 id）。
+    cookieNames: ['sid_guard', 'uid_tt', 'uid_tt_ss'],
     hint: '抖音要求登录或触发了验证，请在登录窗口里完成后再抓取',
     gate: 'soft',
   },

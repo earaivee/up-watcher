@@ -25,6 +25,7 @@ export default function App({ modal }) {
   const [sources, setSources] = useState([]);
   const [posts, setPosts] = useState([]);
   const [dataRoot, setDataRoot] = useState('');
+  const [logFile, setLogFile] = useState('');      // 本次运行日志的路径（设置里可直接打开）
   const [listId, setListId] = useState('all');       // 左侧分组：'all' 或平台 id
   const [sourceId, setSourceId] = useState(null);
   const [kind, setKind] = useState(null);
@@ -88,6 +89,7 @@ export default function App({ modal }) {
       setPlatforms(res.data.platforms);
       setSources(res.data.sources);
       setDataRoot(res.data.dataRoot);
+      setLogFile(res.data.logFile || '');
       setSyncRunning(!!res.data.running);
       // 版本号放在窗口标题栏（exe 最顶部）：「你快更新啊 v0.2.0」
       if (res.data.version) document.title = `你快更新啊 v${res.data.version}`;
@@ -363,6 +365,7 @@ export default function App({ modal }) {
         settings={settings}
         platforms={platforms}
         dataRoot={dataRoot}
+        logFile={logFile}
         onClose={() => setModalOpen(null)}
         onSave={saveSettings}
         onNewPlatform={() => { setModalOpen(null); openPlatformModal(null); }}

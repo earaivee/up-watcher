@@ -48,6 +48,10 @@ contextBridge.exposeInMainWorld('up', {
     stats: () => invoke('data:stats'),
   },
 
+  log: {
+    open: () => invoke('log:open'),
+  },
+
   syncNow: () => invoke('sync:now'),
 
   autoLaunch: {

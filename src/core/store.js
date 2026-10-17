@@ -6,7 +6,8 @@
  *   <数据目录>/
  *   ├─ _global/            全局：settings.json（设置）、platforms.json（平台注册表，
  *   │                      描述有哪些模块、怎么读取）、live.json（直播状态）、
- *   │                      open-link.log（诊断日志）、legacy/（旧结构迁移留档）
+ *   │                      open-link.log（打开链接诊断）、app.log（本次运行日志，
+ *   │                      每次启动重写）、legacy/（旧结构迁移留档）
  *   ├─ bilibili/           每个平台一个文件夹：sources.json（该平台的订阅）、
  *   │                      posts.ndjson（内容历史，只追加）、session.json（登录态）
  *   ├─ douyin/…
@@ -247,6 +248,9 @@ class Store {
   /* ------------------------- 全局文件（_global/） ------------------------- */
 
   globalPath(name) { return path.join(this.root, GLOBAL_DIR, name); }
+
+  /** 全局目录本体（日志等按文件写的东西放这里，跟 open-link.log 并列）。 */
+  get globalDir() { return path.join(this.root, GLOBAL_DIR); }
 
   readGlobal(name, fallback) { return this.readJson(path.join(GLOBAL_DIR, name), fallback); }
 

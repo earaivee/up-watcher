@@ -53,6 +53,7 @@
           ]
         }
       ],
+      "icon": "build/icon.ico",
       "artifactName": "up-watcher-${version}-${arch}.${ext}"
     },
     "portable": {

@@ -279,6 +279,7 @@ class Scheduler {
     this.store = deps.store;
     this.notifier = deps.notifier;
     this.emit = deps.emit || (() => {});
+    this.log = deps.log || (() => {}); // 采集细节写进日志：0 条时能看出是没截到还是被范围滤掉
     this.timer = null;
     this.running = false;
     this.startedAt = 0;
@@ -404,8 +405,11 @@ class Scheduler {
       const collected = await platform.collect(source, { rangeDays, known, maxPages: pages, maxItems, backfill: !!options.backfill, onBatch });
       if (!collected.ok) {
         this.markSync(source, { error: collected.message });
+        this.log(`${source.name || source.id}（${source.platformId}）采集失败：${collected.message}`, 'error');
         return { posts: fresh, error: collected.message, needLogin: collected.needLogin ? collected.message : null };
       }
+      // 关键诊断：0 条时要能分清「页面一条都没截到」和「截到了但都早于回看范围」
+      this.log(`${source.name || source.id}（${source.platformId}）范围 ${rangeDays} 天：截获 ${collected.raw ?? collected.items.length} 条，入库 ${collected.items.length} 条${collected.notice ? '；' + collected.notice : ''}`);
       fresh.push(...platform.commit(collected.items));
       await this.applyProfile(source, collected.profile);
       const livePost = await this.handleLive(source, collected.live, first);

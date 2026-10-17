@@ -36,6 +36,9 @@ class Platform {
     this.def = definition;
     this.ctx = context; // { store, session, notify, browser }
     this.loginState = (context.session && context.session.login) || {};
+    // 采集细节写进运行日志：接口给了几条、被范围滤掉几条、为什么停，
+    // 0 条时全靠这些行判断是「平台没给数据」还是「我们把它滤掉了」。
+    this.log = context.log || (() => {});
   }
 
   get id() { return this.def.id; }
@@ -83,13 +86,20 @@ class Platform {
     const { rangeDays, known = new Set(), maxItems = 0 } = options;
     if (this.def.login && this.isBlockingLoginGate()) {
       const probe = await this.verifyLogin().catch((err) => ({ ok: false, message: err.message }));
-      if (!probe.ok) return { ok: false, needLogin: true, message: this.def.login.hint || '登录态已失效，请重新登录' };
+      if (!probe.ok) {
+        this.log(`登录校验未通过，不采集：${probe.message || ''}`, 'warn');
+        return { ok: false, needLogin: true, message: this.def.login.hint || '登录态已失效，请重新登录' };
+      }
     }
     const profile = await this.fetchProfile(source).catch(() => null);
     const items = await this.fetchItems(source, rangeDays, known, options);
     const live = await this.checkLive(source).catch(() => null);
+    this.log(`采集结束：拿到 ${items.length} 条${profile ? '' : '（资料没抓到）'}`);
     const blocked = this.diagnose ? this.diagnose() : null;
-    if (blocked && !items.length) return { ok: false, needLogin: true, message: blocked.message };
+    if (blocked && !items.length) {
+      this.log(`判定被拦：${blocked.message}`, 'error');
+      return { ok: false, needLogin: true, message: blocked.message };
+    }
     return {
       ok: true,
       profile,

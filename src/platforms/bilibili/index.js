@@ -73,6 +73,7 @@ class BiliPlatform extends Platform {
       const card = await net.getJson(`https://api.bilibili.com/x/web-interface/card?mid=${source.platformKey}`,
         { headers: this.headers(source) });
       node = card?.code === 0 ? card.data?.card : null;
+      this.log(`wbi 资料接口没数据，改用 card 接口：${node ? '拿到' : '也没有'}`, node ? 'info' : 'warn');
     }
     return node ? this.readUser(source, node) : null;
   }
@@ -83,8 +84,19 @@ class BiliPlatform extends Platform {
     const query = signed
       ? signParams({ ...params, ...this.guard.fingerprint() }, ctx.mixinKey[0], ctx.mixinKey[1])
       : new URLSearchParams(params).toString();
-    const res = await net.getJson(`https://api.bilibili.com${endpoint}?${query}`, { headers: this.headers(source, ctx) });
-    if (signed && (res?.code === -352 || res?.code === -403)) {
+    const t0 = Date.now();
+    let res;
+    try {
+      res = await net.getJson(`https://api.bilibili.com${endpoint}?${query}`, { headers: this.headers(source, ctx) });
+    } catch (err) {
+      this.log(`请求 ${endpoint} 失败：${err.message}（${Date.now() - t0}ms）`, 'error');
+      throw err;
+    }
+    const code = res?.code;
+    const level = code === 0 ? 'info' : 'warn';
+    this.log(`请求 ${endpoint} → code=${code}${code === 0 ? '' : ` ${res?.message || ''}`}（${Date.now() - t0}ms）`, level);
+    if (signed && (code === -352 || code === -403)) {
+      this.log(`签名被拒（code=${code}），刷新指纹重试`, 'warn');
       const fresh = await this.guard.get(this.loginState, true);
       const retry = signParams({ ...params, ...this.guard.fingerprint() }, fresh.mixinKey[0], fresh.mixinKey[1]);
       return net.getJson(`https://api.bilibili.com${endpoint}?${retry}`, { headers: this.headers(source, fresh) });
@@ -122,11 +134,14 @@ class BiliPlatform extends Platform {
     this.snapshotBudget = 6;
     const kinds = new Set(source.contentTypes?.length ? source.contentTypes : this.contentTypes);
     const wantsDynamic = [...kinds].some((k) => k !== '视频');
+    this.log(`B站采集开始 ${source.name || source.platformKey}（mid=${source.platformKey}）范围 ${rangeDays} 天，${backfill ? '补抓' : '增量'}，形式 ${[...kinds].join('/')}，已入库 ${known.size}，最多 ${maxPages} 页`);
     const groups = [];
     if (kinds.has('视频')) groups.push(this.videoPages(source, rangeDays, known, maxItems, maxPages, backfill, onBatch));
     if (wantsDynamic) groups.push(this.dynamicPages(source, rangeDays, known, maxItems, kinds, maxPages, backfill, onBatch));
     const lists = await Promise.all(groups);
-    return lists.flat().sort((a, b) => b.publishedAt - a.publishedAt);
+    const flat = lists.flat().sort((a, b) => b.publishedAt - a.publishedAt);
+    this.log(`B站采集结束：拿到 ${flat.length} 条${flat.length ? '' : '（0 条时看上面的分页行：是接口没数据还是被范围滤掉）'}`);
+    return flat;
   }
 
   /**
@@ -139,8 +154,12 @@ class BiliPlatform extends Platform {
       const res = await this.api(endpoint, params(i), source, true);
       if (!isEmpty(res)) return res;
       this.emptyStreak++;
-      if (i < attempts - 1) await net.sleep(4000 * (i + 1)); // 抖动会自行恢复，多等一会儿再试
+      if (i < attempts - 1) {
+        this.log(`${endpoint} 空页（第 ${i + 1}/${attempts} 次），等 ${4 * (i + 1)}s 重试`, 'warn');
+        await net.sleep(4000 * (i + 1)); // 抖动会自行恢复，多等一会儿再试
+      }
     }
+    this.log(`${endpoint} 连续 ${attempts} 次空页，放弃本页`, 'warn');
     return { code: 0, data: {}, giveUp: true };
   }
 
@@ -167,6 +186,7 @@ class BiliPlatform extends Platform {
    */
   diagnose() {
     if (this.emptyStreak >= 3) {
+      this.log(`连续 ${this.emptyStreak} 次空页，判定风控限流`, 'warn');
       return { message: 'B站一直没有返回数据（多半是风控限流）。登录后能明显缓解，也可以在设置里调大检查间隔。' };
     }
     return null;
@@ -183,8 +203,8 @@ class BiliPlatform extends Platform {
         source, (r) => this.isVideoPageEmpty(r));
       const list = res?.data?.list?.vlist || [];
       const total = Number(res?.data?.page?.count ?? 0);
-      if (!list.length) break;
-      if (total === 0) return out; // 这个 UP 主确实没有投稿
+      if (!list.length) { this.log(`视频页 pn=${pn} 空，停止翻页`, 'warn'); break; }
+      if (total === 0) { this.log('该 UP 主没有投稿（count=0）'); return out; }
       let knownRun = 0;
       let staged = 0;  // 本页入库数
       let dropped = 0; // 本页被范围滤掉数
@@ -192,7 +212,13 @@ class BiliPlatform extends Platform {
       for (const raw of list) {
         const post = await this.stage(source, this.videoMapper(source, raw), rangeDays);
         if (!post) { dropped++; continue; }
-        if (known.has(post.id)) { if (!backfill && ++knownRun >= 6) return out; continue; }
+        if (known.has(post.id)) {
+          if (!backfill && ++knownRun >= 6) {
+            this.log(`视频页 pn=${pn}：连续命中已入库 6 条，增量到此为止（累计 ${out.length}）`);
+            return out;
+          }
+          continue;
+        }
         knownRun = 0;
         out.push(post);
         pagePosts.push(post);
@@ -201,8 +227,9 @@ class BiliPlatform extends Platform {
       }
       // 这页抓完先落库：中途断掉也不至于白翻
       onBatch?.(pagePosts);
+      this.log(`视频页 pn=${pn}：返回 ${list.length} 条，入库 ${staged}，范围外 ${dropped}，累计 ${out.length}/${total}`);
       // 列表按时间倒序：整页都在范围之外，更早的页没有翻的意义
-      if (!staged && dropped) return out;
+      if (!staged && dropped) { this.log(`整页都早于回看范围（${rangeDays} 天），停止翻页`); return out; }
       if (list.length < pageSize) break;
     }
     return out;
@@ -217,7 +244,7 @@ class BiliPlatform extends Platform {
         () => ({ host_mid: source.platformKey, offset, timezone_offset: -480, features: 'itemOpusStyle', platform: 'web' }),
         source, (r) => this.isDynamicPageEmpty(r));
       const items = res?.data?.items || [];
-      if (!items.length) break;
+      if (!items.length) { this.log(`动态页 ${page} 空，停止翻页`, 'warn'); break; }
       let staged = 0;
       let dropped = 0;
       const pagePosts = [];
@@ -234,8 +261,9 @@ class BiliPlatform extends Platform {
       }
       // 这页抓完先落库
       onBatch?.(pagePosts);
+      this.log(`动态页 ${page}：返回 ${items.length} 条，入库 ${staged}，未入 ${dropped}，累计 ${out.length}`);
       // 动态流同样按时间倒序：整页都进不了库（超出范围居多），早停
-      if (!staged && dropped && backfill) break;
+      if (!staged && dropped && backfill) { this.log(`整页都进不了库（多半早于 ${rangeDays} 天），停止翻页`); break; }
       offset = res?.data?.offset || '';
       if (!offset || !res?.data?.has_more) break;
     }
@@ -359,6 +387,7 @@ class BiliPlatform extends Platform {
     const res = await net.getJson('https://api.bilibili.com/x/web-interface/nav',
       { headers: { Cookie: net.cookieHeader(this.loginState.cookies) } });
     const data = res?.data || {};
+    this.log(`登录校验：${data.isLogin ? `已登录（${data.uname || ''}${ctx ? '' : '，WBI 未就绪'}）` : '未登录或已失效'}`, data.isLogin ? 'info' : 'warn');
     if (data.isLogin) {
       await this.cacheAvatar({ platformKey: String(data.mid || 'me'), id: 'me' }, normalizeUrl(data.face || '')).catch(() => null);
       return { ok: true, message: '', name: data.uname, avatarUrl: data.face, mid: data.mid, wbi: !!ctx };

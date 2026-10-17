@@ -67,26 +67,48 @@ class DouyinPlatform extends Platform {
    */
   async collect(source, options = {}) {
     const { rangeDays, known = new Set(), maxItems = 0 } = options;
-    this.captured = { posts: [], profile: null, followings: [], blocked: false };
+    this.captured = { posts: [], profile: null, followings: [], blocked: false, postResponses: 0 };
     this.rangeNotice = null;
+    const t0 = Date.now();
+    this.log(`抖音采集开始 ${source.name || source.platformKey} 范围 ${rangeDays} 天，${options.backfill ? '补抓' : '增量'}，已入库 ${known.size} 条`);
+    // 登录态是作品列表的前提：未登录时资料接口照样返回，作品接口却根本不发，
+    // 表现就是「昵称头像都有、内容 0 条」，日志里必须能一眼看到。
+    // 存盘状态（session.json）和浏览器分区可能不一致，两个都报，不报凭证值。
+    const liveState = await this.liveLoginState();
+    const ok = liveState.partition.length > 0;
+    this.log(`登录态：存档=${this.isLoggedIn ? '已登录' : '未登录'}，浏览器分区凭证=${liveState.partition.length ? liveState.partition.join('、') : '无'}${ok ? '' : '（未登录时作品列表拿不到，请在设置里登录抖音）'}`,
+      ok ? 'info' : 'warn');
 
     // 一次导航同时截：用户资料接口 + 作品列表接口
     this.session.capture(this.def.capture?.profile || '/aweme/v1/web/user/profile/other/', (text) => {
       const json = safeJson(text);
       const user = json?.user || json?.user_info || json?.data?.user;
-      if (user) this.captured.profile = user;
+      if (!user) return;
+      this.captured.profile = user;
+      this.log(`截获资料接口：${user.nickname || '(无昵称)'}`);
     });
     this.session.capture(POST_API, (text) => {
       const json = safeJson(text);
-      if (json && Array.isArray(json.aweme_list)) this.captured.posts.push(...json.aweme_list);
+      if (!json) return;
+      this.captured.postResponses++; // 区分「接口压根没请求」和「请求了但给了空列表」
+      if (Array.isArray(json.aweme_list)) {
+        this.captured.posts.push(...json.aweme_list);
+        this.log(`截获作品接口 ${json.aweme_list.length} 条（累计 ${this.captured.posts.length}）`);
+      } else if (json.status_code) {
+        this.log(`作品接口返回 status_code=${json.status_code}${json.status_msg ? ' ' + json.status_msg : ''}`, 'warn');
+      }
     });
 
-    await this.session.goto(this.pageUrl(source));
+    const url = this.pageUrl(source);
+    this.log(`打开主页 ${url}`);
+    await this.session.goto(url);
     await this.ensureLoggedInOrWarn();
+    if (this.captured.blocked) this.log('页面出现登录/验证提示', 'warn');
     // 补抓要尽量翻全：滚动次数放大，加载出更早的作品
     const scrollTimes = options.backfill
       ? (this.def.backfillScrollTimes || 12)
       : (this.def.scrollTimes || 2);
+    this.log(`滚动 ${scrollTimes} 次（每次间隔 ${this.def.scrollDelay || 1800}ms）`);
     await this.session.scroll(scrollTimes, this.def.scrollDelay || 1800);
     await this.persistCookies();
 
@@ -94,18 +116,25 @@ class DouyinPlatform extends Platform {
     let user = this.captured.profile;
     if (!user) user = await this.readUserFromHtml();
     const profile = user ? await this.readUser(source, user) : null;
+    if (!user) this.log('资料接口没截到，页面 RENDER_DATA 也没有', 'warn');
 
     const posts = dedupe(this.captured.posts)
       .sort((a, b) => toMillis(b.create_time) - toMillis(a.create_time));
+    this.log(`去重后 ${posts.length} 条（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
     const blocked = this.diagnose();
-    if (blocked && !posts.length) return { ok: false, needLogin: true, message: blocked.message };
+    if (blocked && !posts.length) {
+      this.log(`判定被拦：${blocked.message}`, 'error');
+      return { ok: false, needLogin: true, message: blocked.message };
+    }
 
     const items = [];
+    let dropped = 0;
     for (const aweme of posts) {
       const post = await this.stage(source, this.mapItem(source, aweme), rangeDays);
-      if (post) items.push(post);
+      if (post) items.push(post); else dropped++;
       if (maxItems && items.length >= maxItems) break;
     }
+    if (dropped) this.log(`范围内 ${items.length} 条，范围外（早于 ${rangeDays} 天）${dropped} 条`);
     // 直播状态走子类 checkLive（当前为按需检测、返回 null；将来实现后这里自动生效）
     const live = await this.checkLive(source).catch(() => null);
     // 截到了作品却全被回看范围滤掉：如实说明，别让用户对着 0 条猜「是不是坏了」。
@@ -113,10 +142,17 @@ class DouyinPlatform extends Platform {
     this.rangeNotice = posts.length && !items.length && isFinite(rangeDays)
       ? `抓到 ${posts.length} 条作品，但都早于回看范围（近 ${rangeDays} 天）；在「订阅设置」里调大回看范围后点「补抓历史」`
       : null;
+    // 一条都没截到也要说清：要么是页面没加载出作品列表（风控 / 需要登录 / 慢），
+    // 要么是这个主页本来就没有公开作品。两种情况都别静默返回 0 条。
+    if (!posts.length) {
+      this.rangeNotice = '主页没加载出作品列表：可能需要登录后再试，或该主页暂无公开作品；稍等一会儿点「刷新」重试一次';
+    }
+    this.log(`抖音采集结束：截获 ${posts.length} 条，范围内 ${items.length} 条${items.length ? '' : '（0 条时注意看上面的截获行数）'}`);
     return {
       ok: true,
       profile,
       items,
+      raw: posts.length, // 截获的原始条数（未过滤），0 条时靠它区分「没截到」和「被范围滤掉」
       live,
       notice: !items.length ? this.rangeNotice : null,
       fetchedAt: Date.now(),
@@ -146,6 +182,14 @@ class DouyinPlatform extends Platform {
     };
     if (avatarUrl) profile.avatar = await this.cacheAvatar(source, avatarUrl);
     return profile;
+  }
+
+  /** 浏览器分区里实际还在的登录凭证名（只返回名字，不返回值）。 */
+  async liveLoginState() {
+    const jar = await require('../core/browser').BrowserSession
+      .readCookies(this.def.login?.cookieUrl || 'https://www.douyin.com').catch(() => ({}));
+    const names = (this.def.login?.cookieNames || []).filter((n) => jar[n]);
+    return { partition: names };
   }
 
   /** 把页面 Cookie 落盘，登录态就能跟着数据目录走（切换帐号后会自动更新）。 */

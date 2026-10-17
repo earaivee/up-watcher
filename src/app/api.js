@@ -66,6 +66,7 @@ class Api {
       // 不能等到用户点「保存」才写——写失败（安全软件拦截）得马上告诉用户。
       'autostart:get': () => autostart.get(),
       'autostart:set': (enabled) => this.setAutoStart(!!enabled),
+      'log:open': () => this.openLog(),
     };
     for (const [channel, handler] of Object.entries(routes)) {
       ipcMain.handle(channel, async (_event, payload) => this.guard(() => handler(payload)));
@@ -84,6 +85,7 @@ class Api {
   }
 
   broadcast(name, data) {
+    this.log(`事件 ${name}`); // 界面能看到的，日志里也留一份（界面刷新之后日志就是唯一现场）
     for (const win of this.app.windows()) {
       if (!win.isDestroyed()) win.webContents.send('event', { name, data });
     }
@@ -98,6 +100,7 @@ class Api {
       dataRoot: this.app.store.root,
       running: this.app.scheduler.running,
       autoLaunch: autostart.get(), // 系统里的真实状态，界面开关以它为准
+      logFile: this.app.logger ? this.app.logger.file : null,
       version: require('../../package.json').version, // 界面显示版本号，方便确认跑的是不是新版
     };
   }
@@ -110,7 +113,24 @@ class Api {
     const next = { ...this.settings(), ...patch };
     this.app.store.writeGlobal('settings.json', next);
     this.app.emit('settings:changed', next);
+    this.log(`设置已保存 回看=${next.range} 间隔=${next.intervalMinutes}分 通知=${next.notifyMode} 开机自启=${!!next.openAtLogin}`);
     return next;
+  }
+
+  /** 在资源管理器里打开本次运行的日志（排错时用户能直接把文件发出来）。 */
+  openLog() {
+    const file = this.app.logger && this.app.logger.file;
+    if (!file || !require('fs').existsSync(file)) throw new Error('日志文件还没生成');
+    shell.openPath(file);
+    return file;
+  }
+
+  /** 日志：只记动作与结果，不记抓到的内容，也不记 cookie。 */
+  log(msg, level = 'info') {
+    const logger = this.app.logger;
+    if (!logger) return;
+    if (typeof logger[level] === 'function') logger[level](msg);
+    else logger.info(msg);
   }
 
   /**
@@ -118,9 +138,16 @@ class Api {
    * （界面可能因安全软件拦截而失败，此时以系统实际状态为准写回，界面不会「显示开了其实没开」）。
    */
   setAutoStart(enabled) {
-    const info = autostart.set(enabled);
+    let info;
+    try {
+      info = autostart.set(enabled);
+    } catch (err) {
+      this.log(`开机自启设置失败（${enabled ? '开启' : '关闭'}）：${err.message}`, 'error');
+      throw err;
+    }
     this.app.store.writeGlobal('settings.json', { ...this.settings(), openAtLogin: info.enabled });
     this.app.emit('settings:changed', this.settings());
+    this.log(`开机自启已${info.enabled ? '开启' : '关闭'}`);
     return info;
   }
 
@@ -150,6 +177,7 @@ class Api {
       browser: this.app.browser,
       notify: () => {},
       session: { login: this.app.registry.loadSession(def.id) },
+      log: (msg, level) => this.log(msg, level),
     });
     const input = String(raw).trim();
     const found = input ? await platform.identify(input) : null;
@@ -191,6 +219,7 @@ class Api {
     list.push(source);
     this.app.scheduler.saveSources(list);
     this.app.emit('source:added', source);
+    this.log(`新增订阅 ${platform.name}/${found.key}`);
     this.backgroundCollect(source, input?.range || this.settings().range); // 不阻塞界面
     return source;
   }
@@ -230,7 +259,10 @@ class Api {
       const result = await this.app.scheduler.collectNow(source.id, range);
       this.app.emit('collect:done', { sourceId: source.id, ...result });
     };
-    task().catch((err) => this.app.emit('collect:failed', { sourceId: source.id, message: err.message }));
+    task().catch((err) => {
+      this.log(`回溯失败 ${source.name || source.id}：${err.message}`, 'error');
+      this.app.emit('collect:failed', { sourceId: source.id, message: err.message });
+    });
   }
 
   updateSource(patch) {

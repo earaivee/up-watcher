@@ -15,7 +15,8 @@ const FILE = 'platforms.json';
 class Registry {
   constructor(store, deps = {}) {
     this.store = store;
-    this.deps = deps; // { browser, notify }
+    this.deps = deps; // { browser, notify, log }
+    this.log = deps.log || (() => {}); // 透传给每个平台驱动，采集过程才能写日志
     this.defs = this.loadDefinitions();
     this.instances = new Map();
   }
@@ -100,6 +101,7 @@ class Registry {
       browser: this.deps.browser,
       notify: this.deps.notify,
       session: this.sessionFacade(id),
+      log: this.log,
     });
     this.instances.set(id, platform);
     return platform;
