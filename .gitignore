@@ -1,0 +1,5 @@
+node_modules/
+dist/
+up-watcher-data/
+.workbuddy/
+*.log

@@ -1,0 +1,67 @@
+{
+  "name": "up-watcher",
+  "productName": "up-watcher",
+  "version": "0.2.0",
+  "description": "up-watcher（你快更新啊）- 追更 B站 / 抖音等平台的 UP 主与博主",
+  "author": "up-watcher",
+  "license": "MIT",
+  "private": true,
+  "main": "src/app/main.js",
+  "scripts": {
+    "start": "npm run build:ui && node scripts/kill-dev-instances.cjs && electron .",
+    "build:ui": "node scripts/build-ui.cjs && node scripts/inline-ui.cjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "pack": "npm run build:ui && npm run clean && electron-builder --dir",
+    "dist": "npm run build:ui && npm run clean && electron-builder"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^5.5.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "antd": "^5.22.2",
+    "electron": "^42.11.15",
+    "electron-builder": "^26.15.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^8.3.4"
+  },
+  "build": {
+    "appId": "com.up-watcher.app",
+    "productName": "up-watcher",
+    "asar": true,
+    "compression": "normal",
+    "files": [
+      "src/**/*",
+      "!src/ui-src",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "up-watcher-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "up-watcher-${version}-便携版.exe",
+      "requestExecutionLevel": "user",
+      "unpackDirName": "up-watcher"
+    }
+  },
+  "dependencies": {
+    "axios": "^1.20.0"
+  }
+}
