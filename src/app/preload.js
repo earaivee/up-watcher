@@ -50,6 +50,11 @@ contextBridge.exposeInMainWorld('up', {
 
   syncNow: () => invoke('sync:now'),
 
+  autoLaunch: {
+    get: () => invoke('autostart:get'),
+    set: (enabled) => invoke('autostart:set', enabled),
+  },
+
   links: {
     open: (url) => invoke('shell:open', url),
   },

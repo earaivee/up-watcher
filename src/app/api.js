@@ -7,6 +7,7 @@
 const { ipcMain, shell } = require('electron');
 const { parseRangeDays } = require('../core/net');
 const { CUSTOM_TEMPLATE } = require('../platforms/definitions');
+const autostart = require('./autostart');
 
 /** 首次添加订阅时的默认设置。 */
 const DEFAULT_SETTINGS = {
@@ -15,6 +16,7 @@ const DEFAULT_SETTINGS = {
   incrementalLimit: 12,
   notifyMode: 'toast',
   notifyLimit: 3,
+  openAtLogin: false,
 };
 
 class Api {
@@ -60,6 +62,10 @@ class Api {
         return { mode: 'external' };
       },
       'sync:now': () => this.app.scheduler.refreshNow(),
+      // 开机自启单独走：它是系统级设置，要立刻生效并立刻回读真实状态，
+      // 不能等到用户点「保存」才写——写失败（安全软件拦截）得马上告诉用户。
+      'autostart:get': () => autostart.get(),
+      'autostart:set': (enabled) => this.setAutoStart(!!enabled),
     };
     for (const [channel, handler] of Object.entries(routes)) {
       ipcMain.handle(channel, async (_event, payload) => this.guard(() => handler(payload)));
@@ -91,6 +97,7 @@ class Api {
       sources: this.app.scheduler.sources().map((s) => this.decorateSource(s)),
       dataRoot: this.app.store.root,
       running: this.app.scheduler.running,
+      autoLaunch: autostart.get(), // 系统里的真实状态，界面开关以它为准
       version: require('../../package.json').version, // 界面显示版本号，方便确认跑的是不是新版
     };
   }
@@ -104,6 +111,17 @@ class Api {
     this.app.store.writeGlobal('settings.json', next);
     this.app.emit('settings:changed', next);
     return next;
+  }
+
+  /**
+   * 开机自启开关：写系统启动项 + 回读真实状态，并把结果落进 settings.json
+   * （界面可能因安全软件拦截而失败，此时以系统实际状态为准写回，界面不会「显示开了其实没开」）。
+   */
+  setAutoStart(enabled) {
+    const info = autostart.set(enabled);
+    this.app.store.writeGlobal('settings.json', { ...this.settings(), openAtLogin: info.enabled });
+    this.app.emit('settings:changed', this.settings());
+    return info;
   }
 
   savePlatform(def) {

@@ -10,6 +10,7 @@ const { BrowserSession } = require('../core/browser');
 const { Registry } = require('../platforms/registry');
 const { Notifier, LoginService, Scheduler, WebViewer } = require('./services');
 const { Api } = require('./api');
+const autostart = require('./autostart');
 
 const windows = new Set();
 let store;
@@ -152,6 +153,12 @@ app.whenReady().then(() => {
   bootstrap();
   createMainWindow();
   scheduler.start();
+  // 便携版整目录搬走后，注册表里的启动项还指向旧 exe，等于自启悄悄失效。
+  // 每次启动对一下：设置里记着「开了」，但系统里没有，就按现在的 exe 重新登记。
+  try {
+    const saved = store.readGlobal('settings.json', {});
+    if (saved.openAtLogin && autostart.supported() && !autostart.get().enabled) autostart.set(true);
+  } catch { /* 被安全软件拦掉就算了，不改用户设置 */ }
   app.on('activate', () => { if (!windows.size) createMainWindow(); });
 });
 

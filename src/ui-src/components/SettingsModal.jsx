@@ -1,16 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { Button, Form, InputNumber, Modal, Select } from 'antd';
+import { Button, Form, InputNumber, Modal, Select, Switch } from 'antd';
 import { FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
 import { api, RANGE_OPTIONS } from '../api.js';
+import { toast } from '../message.js';
 
 /**
- * 设置弹窗：回看范围 / 刷新间隔 / 增量上限 / 通知方式，
+ * 设置弹窗：回看范围 / 刷新间隔 / 增量上限 / 通知方式 / 开机自启，
  * 登录状态列表（可实时检查），自定义平台入口，数据目录。
  */
 export default function SettingsModal(props) {
   const { open, settings, platforms, dataRoot } = props;
   const [form] = Form.useForm();
   const [checking, setChecking] = useState({});
+  // 系统里的真实自启状态：用户在系统设置里改过、或 exe 被搬走过，都会跟 settings 不一致
+  const [autoLaunch, setAutoLaunch] = useState({ supported: true, enabled: false, reason: '' });
+  const [autoSaving, setAutoSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -20,6 +24,12 @@ export default function SettingsModal(props) {
       incrementalLimit: settings.incrementalLimit ?? 12,
       notifyMode: settings.notifyMode || 'toast',
       notifyLimit: settings.notifyLimit ?? 3,
+      openAtLogin: !!settings.openAtLogin,
+    });
+    api.autoLaunch.get().then((res) => {
+      if (!res.ok || !res.data.supported) return setAutoLaunch({ supported: false, enabled: false, reason: res.data?.reason || '当前系统不支持开机自启' });
+      setAutoLaunch(res.data);
+      form.setFieldsValue({ openAtLogin: !!res.data.enabled });
     });
   }, [open, settings, form]);
 
@@ -31,7 +41,25 @@ export default function SettingsModal(props) {
       incrementalLimit: Math.max(1, Number(values.incrementalLimit) || 12),
       notifyMode: values.notifyMode,
       notifyLimit: Math.max(1, Number(values.notifyLimit) || 3),
+      openAtLogin: !!values.openAtLogin,
     });
+  };
+
+  /** 拨开关就立刻写系统启动项，写完回读真实结果，失败则把开关拨回去。 */
+  const toggleAutoLaunch = async (checked) => {
+    setAutoSaving(true);
+    try {
+      const res = await api.autoLaunch.set(checked);
+      if (!res.ok) throw new Error(res.error);
+      setAutoLaunch(res.data);
+      form.setFieldsValue({ openAtLogin: !!res.data.enabled });
+      toast(`开机自启已${res.data.enabled ? '开启' : '关闭'}`, 'ok');
+    } catch (err) {
+      form.setFieldsValue({ openAtLogin: !checked });
+      toast('开机自启设置失败：' + (err.message || '未知原因'), 'err');
+    } finally {
+      setAutoSaving(false);
+    }
   };
 
   const check = async (p) => {
@@ -81,6 +109,17 @@ export default function SettingsModal(props) {
             { value: 'native', label: 'Windows 通知' },
             { value: 'both', label: '两者都要' },
           ]} />
+        </Form.Item>
+
+        <Form.Item label="开机自启" style={{ marginBottom: 12 }}
+          extra={autoLaunch.supported
+            ? '开机后自动启动并按间隔检查更新；便携版换目录后会自动重新登记'
+            : (autoLaunch.reason || '当前系统不支持开机自启')}>
+          <Form.Item name="openAtLogin" valuePropName="checked" noStyle>
+            <Switch checkedChildren="开" unCheckedChildren="关"
+              disabled={!autoLaunch.supported || autoSaving}
+              onChange={toggleAutoLaunch} />
+          </Form.Item>
         </Form.Item>
 
         <Form.Item label="登录状态" style={{ marginBottom: 12 }}
