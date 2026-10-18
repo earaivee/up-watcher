@@ -152,4 +152,4 @@ function createPlatform(def, context) {
   return new PagePlatform(def, context);
 }
 
-module.exports = { Registry, createPlatform, classify, CUSTOM_TEMPLATE, DEFINITIONS_VERSION };
+module.exports = { Registry, createPlatform };

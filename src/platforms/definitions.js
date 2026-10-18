@@ -64,6 +64,7 @@ const DOUYIN = {
   scrollTimes: 2,
   scrollDelay: 1800,
   settleMs: 1500,
+  backfillScrollTimes: 12, // 老布局补抓时往下翻页的次数（新布局走 DOM 网格，不用这个）
   gridRatio: '9:16', // 图墙封面默认宽高比（竖屏视频）
   driver: 'browser',
   identifyRules: [
@@ -142,4 +143,4 @@ function builtinDefinitions() {
   return JSON.parse(JSON.stringify([BILIBILI, DOUYIN]));
 }
 
-module.exports = { builtinDefinitions, CUSTOM_TEMPLATE, DEFINITIONS_VERSION, BILIBILI, DOUYIN };
+module.exports = { builtinDefinitions, CUSTOM_TEMPLATE, DEFINITIONS_VERSION };

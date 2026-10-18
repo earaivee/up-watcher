@@ -83,8 +83,13 @@ app.on('second-instance', () => {
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
     if (viewer && viewer.open(url)) return { action: 'deny' };
-    shell.openExternal(url).catch(() => { /* 打不开就算了 */ });
+    // 只把 http(s) 交给系统；bytedance:// 等自定义协议交给系统会弹「找应用」，直接忽略
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => { /* 打不开就算了 */ });
     return { action: 'deny' };
+  });
+  // 页面自己跳 bytedance:// 这类自定义协议时（不开新窗口），同样别让它弹系统框
+  contents.on('will-navigate', (event, url) => {
+    if (!/^(https?|file|about|blob|data|devtools|chrome-extension):/i.test(url)) event.preventDefault();
   });
 });
 
@@ -213,7 +218,7 @@ function bootstrap() {
   const log = (msg, level) => logger.line((level || 'info').toUpperCase(), msg);
   registry = new Registry(store, { browser, notify: notifier, emit, log });
   logger.info(`平台注册表就绪：${registry.list().map((p) => p.id).join(', ')}`);
-  scheduler = new Scheduler({ registry, store, notifier, emit, log });
+  scheduler = new Scheduler({ registry, store, notifier, emit, log, browser });
   // 登录成功或窗口关闭都要通知界面刷新登录状态（否则界面一直显示「未登录」）
   login = new LoginService(registry, (info) => emit('login:changed', info));
   const api = new Api({

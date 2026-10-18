@@ -67,18 +67,24 @@ class BrowserSession {
   }
 
   createWindow() {
-    return new BrowserWindow({
+    const win = new BrowserWindow({
       show: false,
       width: 1280,
       height: 900,
+      // 采集窗口静音：视频详情页会自动播放，后台突然出声很吓人（用户反馈）
       webPreferences: {
         partition: PARTITION,
         offscreen: false,
         backgroundThrottling: false,
         contextIsolation: true,
         nodeIntegration: false,
+        audioMuted: true,
+        // 采集窗口不自动播放视频：详情页会自己播，解码帧很吃内存（实测每进一个详情页约 +49MB）
+        autoplayPolicy: 'user-gesture-required',
       },
     });
+    win.webContents.setAudioMuted(true);
+    return win;
   }
 
   /** 等 dom-ready 之后再挂调试器 —— 早挂会让命令永久挂起。 */
@@ -97,8 +103,9 @@ class BrowserSession {
     }
     if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
     await wc.debugger.sendCommand('Network.enable', {
-      maxTotalBufferSize: 256 * 1024 * 1024,
-      maxResourceBufferSize: 64 * 1024 * 1024,
+      // 只保留最近几个页面的响应体即可（每个源采集完就关窗，不需要跨源累积）
+      maxTotalBufferSize: 64 * 1024 * 1024,
+      maxResourceBufferSize: 16 * 1024 * 1024,
     });
     wc.debugger.on('message', (_e, method, params) => this.onCdp(method, params));
     this.attached = true;
@@ -110,6 +117,20 @@ class BrowserSession {
   }
 
   clearRules() { this.rules = []; }
+
+  /**
+   * 当前隐藏窗口渲染进程的内存（KB）；窗口没建好或拿不到返回 null。排错用，不参与业务。
+   * 用 app.getAppMetrics() 按渲染进程 PID 匹配——webContents.getProcessMemoryInfo 在新版 Electron 已移除。
+   */
+  async memoryInfo() {
+    if (!this.win || this.win.isDestroyed()) return null;
+    try {
+      const { app } = require('electron');
+      const pid = this.win.webContents.getOSProcessId();
+      const hit = app.getAppMetrics().find((p) => p.pid === pid);
+      return hit && hit.memory ? hit.memory : null;
+    } catch { return null; }
+  }
 
   /** CDP 事件分发：只处理响应完成事件。 */
   onCdp(method, params) {

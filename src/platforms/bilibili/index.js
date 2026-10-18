@@ -21,7 +21,8 @@ class BiliPlatform extends Platform {
     super(definition, context);
     this.guard = new RiskGuard();
     this.roomIds = new Map();   // uid → room_id，取一次即可
-    this.emptyStreak = 0;       // 连续空页次数，用于判断是不是被风控了
+    this.emptyStreak = 0;       // 连续空页次数（仅用于重试/日志，不再直接判定风控）
+    this.riskSignal = 0;        // 真正出现 -412 / -403 风控错误码的次数
     this.snapshotBudget = 0;    // 本轮还允许几张「无图动态截图封面」，避免拖慢同步
   }
 
@@ -99,8 +100,12 @@ class BiliPlatform extends Platform {
       this.log(`签名被拒（code=${code}），刷新指纹重试`, 'warn');
       const fresh = await this.guard.get(this.loginState, true);
       const retry = signParams({ ...params, ...this.guard.fingerprint() }, fresh.mixinKey[0], fresh.mixinKey[1]);
-      return net.getJson(`https://api.bilibili.com${endpoint}?${retry}`, { headers: this.headers(source, fresh) });
+      const retryRes = await net.getJson(`https://api.bilibili.com${endpoint}?${retry}`, { headers: this.headers(source, fresh) });
+      const rc = retryRes?.code;
+      if (rc === -412 || rc === -403) this.riskSignal++;
+      return retryRes;
     }
+    if (code === -412 || code === -403) this.riskSignal++;
     return res;
   }
 
@@ -131,6 +136,7 @@ class BiliPlatform extends Platform {
   async fetchItems(source, rangeDays, known, options = {}) {
     const { maxItems = 0, maxPages = 12, backfill = false, onBatch } = options;
     this.emptyStreak = 0;
+    this.riskSignal = 0;
     this.snapshotBudget = 6;
     const kinds = new Set(source.contentTypes?.length ? source.contentTypes : this.contentTypes);
     const wantsDynamic = [...kinds].some((k) => k !== '视频');
@@ -166,11 +172,13 @@ class BiliPlatform extends Platform {
   /**
    * 投稿列表的空页判定。
    * 有 data.page（说明请求本身是成功的）却拿不到 vlist，就认为这一页是抖动，必须重试。
-   * 代价是「确实没有投稿」的 UP 主会多试几次，可以接受。
+   * 但 count=0 表示真的没有投稿，不再重试，避免没作品的 UP 被误判。
    */
   isVideoPageEmpty(res) {
     if (!res || res.code !== 0) return false;
     if (!res.data?.page) return true;
+    // count=0 表示这个 UP 确实没有投稿，不是抖动，不该重试
+    if (Number(res.data.page.count ?? 0) === 0) return false;
     return (res.data?.list?.vlist || []).length === 0;
   }
 
@@ -181,13 +189,13 @@ class BiliPlatform extends Platform {
   }
 
   /**
-   * 抓完给调用方的诊断：只有「一直被风控 / 一直空页」才算需要登录，
-   * 网络正常时不要动不动就报警。
+   * 抓完给调用方的诊断：只有真正出现 -412 / -403 风控错误码才算限流。
+   * 空列表只代表「这个 UP 没作品 / 近期没发」，不是故障，绝不能报风控。
    */
   diagnose() {
-    if (this.emptyStreak >= 3) {
-      this.log(`连续 ${this.emptyStreak} 次空页，判定风控限流`, 'warn');
-      return { message: 'B站一直没有返回数据（多半是风控限流）。登录后能明显缓解，也可以在设置里调大检查间隔。' };
+    if (this.riskSignal > 0) {
+      this.log(`本轮出现 ${this.riskSignal} 次风控错误码（-412/-403），判定被限流`, 'warn');
+      return { message: 'B站接口返回风控错误（-412/-403），多半被限流了。登录后能明显缓解，也可以在设置里调大检查间隔。' };
     }
     return null;
   }
@@ -414,4 +422,4 @@ function drawTitle(draw) {
   return '';
 }
 
-module.exports = { BiliPlatform, KINDS };
+module.exports = { BiliPlatform };

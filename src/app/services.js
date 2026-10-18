@@ -168,7 +168,7 @@ class Notifier {
     const target = item.link || source.homeUrl;
     if (!target) return;
     if (this.webViewer && this.webViewer.open(target)) return;
-    shell.openExternal(target).catch(() => { /* 打不开就算了 */ });
+    if (/^https?:\/\//i.test(target)) shell.openExternal(target).catch(() => { /* 打不开就算了 */ });
   }
 }
 
@@ -280,6 +280,7 @@ class Scheduler {
     this.notifier = deps.notifier;
     this.emit = deps.emit || (() => {});
     this.log = deps.log || (() => {}); // 采集细节写进日志：0 条时能看出是没截到还是被范围滤掉
+    this.browser = deps.browser || null; // 采集用的隐藏窗口，一轮结束后主动关掉
     this.timer = null;
     this.running = false;
     this.startedAt = 0;
@@ -296,6 +297,14 @@ class Scheduler {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.stopped = true; // 让正在跑的这一轮在下一个订阅源处收手
+  }
+
+  /** 关掉隐藏采集窗口（没有就跳过），真正关掉才记一行日志。每采完一个源就调一次。 */
+  async releaseBrowser() {
+    if (!this.browser) return;
+    const existed = !!(this.browser.win && !this.browser.win.isDestroyed());
+    await this.browser.close().catch(() => { /* 已经关了 */ });
+    if (existed) this.log('采集窗口已关闭');
   }
 
   /** 取出到点的订阅源并开始同步（上一轮没跑完就跳过）。 */
@@ -336,17 +345,25 @@ class Scheduler {
    * （那两个限制是给每轮增量检查防限流用的）。
    */
   async collectNow(sourceId, range) {
-    const list = this.sources();
-    const source = list.find((s) => s.id === sourceId);
-    if (!source) throw new Error('订阅不存在');
-    const result = await this.syncSource(source, {
-      rangeOverride: range, notify: false, backfill: true,
-      maxPages: 999, maxItems: 0, // 全量：翻页由驱动自己收口（没有更多 / 整页超出范围）
-    });
-    return {
-      added: result.posts.length, error: result.error,
-      needLogin: result.needLogin, notice: result.notice || null,
-    };
+    // 和调度共用一把锁：手动补抓不能和定时同步同时抢同一个隐藏窗口（并发会互相打断、数量对不上）
+    if (this.running) return { added: 0, error: null, skipped: true, message: '已有同步在进行，稍后会自动补抓' };
+    this.running = true;
+    try {
+      const list = this.sources();
+      const source = list.find((s) => s.id === sourceId);
+      if (!source) throw new Error('订阅不存在');
+      const result = await this.syncSource(source, {
+        rangeOverride: range, notify: false, backfill: true,
+        maxPages: 999, maxItems: 0, // 全量：翻页由驱动自己收口（没有更多 / 整页超出范围）
+      });
+      return {
+        added: result.posts.length, error: result.error,
+        needLogin: result.needLogin, notice: result.notice || null,
+      };
+    } finally {
+      this.running = false;
+      await this.releaseBrowser();
+    }
   }
 
   /** 同步一批订阅源；每个源之间留出间隔，避免同时打满接口被风控。options 透传给 syncSource。 */
@@ -365,11 +382,15 @@ class Scheduler {
         if (result.error) failures.push({ sourceId: source.id, message: result.error });
         if (result.needLogin) failures.push({ sourceId: source.id, message: result.needLogin, needLogin: true });
         added.push(...result.posts.map((p) => ({ sourceId: source.id, source })));
+        // 每个源采集完就关掉隐藏窗口：避免内存跨账号累积（实测同一窗口复用会让渲染进程从 500MB 涨到 1GB+）
+        await this.releaseBrowser();
         await new Promise((r) => setTimeout(r, 1200)); // 源之间留间隔
       }
     } finally {
       this.running = false;
       this.stopped = false;
+      // 收尾兜底：循环中间若因 stopped 提前退出，这里再关一次（已关就是 no-op）
+      await this.releaseBrowser();
     }
     this.emit('sync:done', { added: added.length, failures });
     return { ok: true, added: added.length, failures, durationMs: Date.now() - this.startedAt };

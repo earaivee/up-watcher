@@ -58,7 +58,8 @@ class Api {
       'shell:open': (url) => {
         if (!url) return { mode: 'none' };
         if (this.app.webViewer && this.app.webViewer.open(url)) return { mode: 'viewer' };
-        shell.openExternal(url).catch(() => {});
+        // 只把 http(s) 交给系统，避免 bytedance:// 等协议弹「找应用」
+        if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
         return { mode: 'external' };
       },
       'sync:now': () => this.app.scheduler.refreshNow(),
@@ -430,4 +431,4 @@ function homeUrlOf(platform, key) {
   return tpl;
 }
 
-module.exports = { Api, DEFAULT_SETTINGS, parseRangeDays };
+module.exports = { Api };
