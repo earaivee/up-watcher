@@ -111,6 +111,8 @@ class DouyinPlatform extends Platform {
     // 增量只读第一页；补抓滚到底部（新布局边滚边收，老布局翻页加载更多）。
     let domItems = []; // DOM 兜底已 staged 的条目（抓一批入库一批）
     if (!this.captured.postResponses) {
+      // 强制绕过缓存重载一次：作品网格是服务端直出的，缓存里的旧 HTML 会漏掉刚发的视频
+      await this.session.reloadIgnoringCache();
       await this.tryOpenWorksTab();
       domItems = await this.collectByDom(source, rangeDays, known, options);
       await this.logMem('DOM兜底后');
@@ -156,8 +158,9 @@ class DouyinPlatform extends Platform {
     // 一条都没截到也要说清：要么是页面没加载出作品列表（风控 / 需要登录 / 慢），
     // 要么是这个主页本来就没有公开作品。两种情况都别静默返回 0 条。
     if (!posts.length) {
-      if (this.captured.domLinks > 0 && this.captured.domSkipped > 0 && !this.captured.domHitOld) {
-        // 作品都在库里、没有新内容：别误报成「都早于回看范围」
+      // 有已入库的作品被跳过 = 近期作品本来就在库里，只是没有新内容；
+      // 不能因为后面又碰到一个「范围外」就误报成「都早于回看范围」。
+      if (this.captured.domLinks > 0 && this.captured.domSkipped > 0) {
         this.rangeNotice = `近期作品都已入库，没有新内容（近 ${rangeDays} 天）`;
       } else if (this.captured.domLinks > 0) {
         this.rangeNotice = `主页有 ${this.captured.domLinks} 个作品，但都早于回看范围（近 ${rangeDays} 天）；在「订阅设置」里调大回看范围后点「补抓历史」`;
@@ -262,6 +265,14 @@ class DouyinPlatform extends Platform {
       return [];
     }
     this.captured.domLinks = cards.length;
+    // 诊断：页面第一个卡片是不是最新那条？它是否已在库里？——定位「漏掉今天新视频」
+    if (known && known.size && cards[0]) {
+      const fid = `${source.id}:${this.id}:${cards[0].aweme_id}`;
+      const hit = known.has(fid) ? this.ctx.store.getPost(fid) : null;
+      this.log(`DOM 兜底：页面第 1 个 ${cards[0].aweme_id} ${hit
+        ? `已入库（${new Date(toMillis(hit.publishedAt)).toLocaleDateString('zh-CN')}）`
+        : '未入库（新）'}`);
+    }
     // 补抓（3月 / 1年 / 全部）不设硬上限，网格有多少张卡就处理多少张；增量按 maxItems 收口
     const cap = options.backfill ? cards.length : Math.min(cards.length, 40);
     const maxItems = Number(options.maxItems) || 0;
@@ -287,7 +298,9 @@ class DouyinPlatform extends Platform {
         skipped++;
         const hit = this.ctx.store.getPost(postId);
         const knownTime = toMillis(hit && hit.publishedAt);
-        if (isFinite(rangeDays) && knownTime && knownTime < rangeStart) {
+        // 只有补抓才在「已入库且超范围」处停；增量必须看完整页——
+        // 否则新作品只要排在某个已入库旧作品后面，就会被直接截掉（漏掉今天的新视频）。
+        if (options.backfill && isFinite(rangeDays) && knownTime && knownTime < rangeStart) {
           hitOld = true;
           this.log(`DOM 兜底：第 ${i + 1} 个已入库且早于 ${rangeDays} 天，停止（列表最新在前）`);
           break;

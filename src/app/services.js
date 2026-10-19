@@ -430,8 +430,10 @@ class Scheduler {
         return { posts: fresh, error: collected.message, needLogin: collected.needLogin ? collected.message : null };
       }
       // 关键诊断：0 条时要能分清「页面一条都没截到」和「截到了但都早于回看范围」
-      this.log(`${source.name || source.id}（${source.platformId}）范围 ${rangeDays} 天：截获 ${collected.raw ?? collected.items.length} 条，入库 ${collected.items.length} 条${collected.notice ? '；' + collected.notice : ''}`);
-      fresh.push(...platform.commit(collected.items));
+      // 「范围内 N 条」不等于「新增 N 条」：已经在库里的会被 commit 去重，所以分开报，避免误读。
+      const addedNow = platform.commit(collected.items);
+      fresh.push(...addedNow);
+      this.log(`${source.name || source.id}（${source.platformId}）范围 ${rangeDays} 天：截获 ${collected.raw ?? collected.items.length} 条，范围内 ${collected.items.length} 条，真正新增 ${addedNow.length} 条${collected.notice ? '；' + collected.notice : ''}`);
       await this.applyProfile(source, collected.profile);
       const livePost = await this.handleLive(source, collected.live, first);
       if (livePost) fresh.push(livePost);

@@ -177,6 +177,24 @@ class BrowserSession {
     return this.win;
   }
 
+  /** 强制绕过缓存重载当前页：拿最新服务端渲染内容（抖音主页的 DOM 网格就是这么来的）。 */
+  async reloadIgnoringCache() {
+    if (!this.win || this.win.isDestroyed()) return;
+    const wc = this.win.webContents;
+    if (!wc.getURL() || wc.getURL() === 'about:blank') return;
+    await new Promise((resolve) => {
+      let timer = setTimeout(resolve, 15000);
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        wc.removeListener('dom-ready', done);
+        resolve();
+      };
+      wc.once('dom-ready', done);
+      try { wc.reloadIgnoringCache(); } catch { done(); }
+    });
+    await net.sleep(this.def?.settleMs || 1200);
+  }
+
   /** 在页面里执行 JS，超时/失败返回 null。 */
   async eval(script, timeoutMs = 15000) {
     if (!this.win || this.win.isDestroyed()) return null;
